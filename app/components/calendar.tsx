@@ -29,6 +29,7 @@ export default function App() {
   const timeoutTimer = useRef<ReturnType<typeof setTimeout>>()
   const pollCount = useRef(0)
   const errorCount = useRef(0)
+  const hadSuccessfulPoll = useRef(false)
   const abortRef = useRef<AbortController>()
 
   useEffect(() => {
@@ -58,6 +59,7 @@ export default function App() {
         const data = await res.json()
 
         errorCount.current = 0
+        hadSuccessfulPoll.current = true
         if (data.status === 'completed') {
           setStatus('completed')
           setResult(data.result)
@@ -91,6 +93,7 @@ export default function App() {
     setResult(null)
     pollCount.current = 0
     errorCount.current = 0
+    hadSuccessfulPoll.current = false
     abortRef.current = new AbortController()
 
     try {
@@ -114,6 +117,9 @@ export default function App() {
       timeoutTimer.current = setTimeout(() => {
         clearTimeout(pollTimer.current)
         setStatus('timeout')
+        if (!hadSuccessfulPoll.current) {
+          setError('서버에 연결할 수 없습니다')
+        }
       }, 60000)
     } catch (e) {
       setStatus('failed')
@@ -327,7 +333,7 @@ export default function App() {
                     <span className="text-sm font-semibold text-[#7a5c20]">시간 초과</span>
                   </div>
                   <p className="text-xs text-[#9a8050] pl-[30px]">
-                    백그라운드에서 처리 중일 수 있습니다
+                    {error || '백그라운드에서 처리 중일 수 있습니다'}
                   </p>
                 </div>
               )}
