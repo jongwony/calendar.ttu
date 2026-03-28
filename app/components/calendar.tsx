@@ -3,7 +3,8 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react'
 
 const API_BASE = 'https://9e240d7v0k.execute-api.ap-northeast-2.amazonaws.com/api'
-const MYDUTY_URL_RE = /https?:\/\/myduty\.io\/s\/\d+/
+const MYDUTY_URL_RE = /https?:\/\/myduty\.io\/s\/\d+\b/
+const MAX_POLL_ERRORS = 8
 
 type Status = 'idle' | 'submitting' | 'polling' | 'completed' | 'failed' | 'timeout'
 
@@ -27,11 +28,14 @@ export default function App() {
   const pollTimer = useRef<ReturnType<typeof setTimeout>>()
   const timeoutTimer = useRef<ReturnType<typeof setTimeout>>()
   const pollCount = useRef(0)
+  const errorCount = useRef(0)
+  const abortRef = useRef<AbortController>()
 
   useEffect(() => {
     return () => {
       clearTimeout(pollTimer.current)
       clearTimeout(timeoutTimer.current)
+      abortRef.current?.abort()
     }
   }, [])
 
@@ -47,9 +51,13 @@ export default function App() {
 
     pollTimer.current = setTimeout(async () => {
       try {
-        const res = await fetch(`${API_BASE}/ttu_gaeng/duty/${jobId}`)
+        const res = await fetch(`${API_BASE}/ttu_gaeng/duty/${jobId}`, {
+          signal: abortRef.current?.signal,
+        })
+        if (!res.ok) throw new Error(`HTTP ${res.status}`)
         const data = await res.json()
 
+        errorCount.current = 0
         if (data.status === 'completed') {
           setStatus('completed')
           setResult(data.result)
@@ -61,7 +69,15 @@ export default function App() {
         } else {
           poll(jobId)
         }
-      } catch {
+      } catch (err) {
+        if (err instanceof DOMException && err.name === 'AbortError') return
+        errorCount.current++
+        if (errorCount.current >= MAX_POLL_ERRORS) {
+          setStatus('failed')
+          setError('서버와의 연결이 불안정합니다')
+          clearTimeout(timeoutTimer.current)
+          return
+        }
         poll(jobId)
       }
     }, delay)
@@ -74,6 +90,8 @@ export default function App() {
     setError('')
     setResult(null)
     pollCount.current = 0
+    errorCount.current = 0
+    abortRef.current = new AbortController()
 
     try {
       const res = await fetch(`${API_BASE}/ttu_gaeng/duty`, {
@@ -84,10 +102,12 @@ export default function App() {
           month: month.toString(),
           website: extractedUrl,
         }),
+        signal: abortRef.current.signal,
       })
       if (!res.ok) throw new Error('요청에 실패했습니다')
 
       const { job_id } = await res.json()
+      if (!job_id) throw new Error('서버에서 작업 ID를 받지 못했습니다')
       setStatus('polling')
       poll(job_id)
 
@@ -107,6 +127,7 @@ export default function App() {
     setResult(null)
     clearTimeout(pollTimer.current)
     clearTimeout(timeoutTimer.current)
+    abortRef.current?.abort()
   }
 
   const isWorking = status === 'submitting' || status === 'polling'
