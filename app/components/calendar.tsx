@@ -3,7 +3,7 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react'
 
 const API_BASE = 'https://9e240d7v0k.execute-api.ap-northeast-2.amazonaws.com/api'
-const MYDUTY_URL_RE = /https?:\/\/myduty\.io\/s\/\d+\b/
+const MYDUTY_URL_RE = /https?:\/\/(?:link\.)?myduty\.io\/(?:s|duty-share)\/\d+\b/
 const MAX_POLL_ERRORS = 8
 
 type Status = 'idle' | 'submitting' | 'polling' | 'completed' | 'failed' | 'timeout'
