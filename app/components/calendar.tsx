@@ -1,9 +1,9 @@
 'use client'
 
 import React, { useState, useCallback, useRef, useEffect } from 'react'
+import { extractMydutyUrl } from '@/app/lib/myduty'
 
 const API_BASE = 'https://9e240d7v0k.execute-api.ap-northeast-2.amazonaws.com/api'
-const MYDUTY_URL_RE = /https?:\/\/myduty\.io\/s\/\d+\b/
 const MAX_POLL_ERRORS = 8
 
 type Status = 'idle' | 'submitting' | 'polling' | 'completed' | 'failed' | 'timeout'
@@ -42,8 +42,7 @@ export default function App() {
 
   const handleTextChange = (text: string) => {
     setRawText(text)
-    const m = text.match(MYDUTY_URL_RE)
-    setExtractedUrl(m ? m[0] : null)
+    setExtractedUrl(extractMydutyUrl(text))
   }
 
   const poll = useCallback((jobId: string) => {
