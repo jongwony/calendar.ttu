@@ -66,6 +66,12 @@ describe('extractMydutyUrl', () => {
       expect(extractMydutyUrl('https://link.myduty.io/duty-share/abc')).toBeNull()
     })
 
+    it('숫자 뒤에 단어 문자가 붙으면 거부 (백엔드 정규식과 동일 동작 — 잘린 id 추출 방지)', () => {
+      // 프론트(\b)·백엔드(\b) 모두 부분 추출 대신 거부해야 한다.
+      expect(extractMydutyUrl('https://myduty.io/s/123abc')).toBeNull()
+      expect(extractMydutyUrl('https://myduty.io/s/123_abc')).toBeNull()
+    })
+
     it('유사 도메인 (피싱 방지: myduty.io.evil.com)', () => {
       expect(extractMydutyUrl('https://myduty.io.evil.com/s/123')).toBeNull()
     })
