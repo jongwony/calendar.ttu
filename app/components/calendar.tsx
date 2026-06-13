@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useCallback, useRef, useEffect } from 'react'
+import React, { useState, useRef, useEffect } from 'react'
 import { extractMydutyUrl } from '@/app/lib/myduty'
 
 const API_BASE = 'https://9e240d7v0k.execute-api.ap-northeast-2.amazonaws.com/api'
@@ -20,21 +20,16 @@ export default function App() {
   const [rawText, setRawText] = useState('')
   const [extractedUrl, setExtractedUrl] = useState<string | null>(null)
   const [year, setYear] = useState(now.getFullYear())
-  const [month, setMonth] = useState(now.getMonth() + 1)
+  const [months, setMonths] = useState<number[]>([now.getMonth() + 1])
   const [status, setStatus] = useState<Status>('idle')
   const [result, setResult] = useState<JobResult | null>(null)
   const [error, setError] = useState('')
 
-  const pollTimer = useRef<ReturnType<typeof setTimeout>>()
   const timeoutTimer = useRef<ReturnType<typeof setTimeout>>()
-  const pollCount = useRef(0)
-  const errorCount = useRef(0)
-  const hadSuccessfulPoll = useRef(false)
   const abortRef = useRef<AbortController>()
 
   useEffect(() => {
     return () => {
-      clearTimeout(pollTimer.current)
       clearTimeout(timeoutTimer.current)
       abortRef.current?.abort()
     }
@@ -45,82 +40,92 @@ export default function App() {
     setExtractedUrl(extractMydutyUrl(text))
   }
 
-  const poll = useCallback((jobId: string) => {
-    pollCount.current++
-    const delay = Math.min(pollCount.current * 1000, 5000)
+  const toggleMonth = (m: number) => {
+    setMonths(prev =>
+      prev.includes(m) ? prev.filter(x => x !== m) : [...prev, m]
+    )
+  }
 
-    pollTimer.current = setTimeout(async () => {
-      try {
-        const res = await fetch(`${API_BASE}/ttu_gaeng/duty/${jobId}`, {
-          signal: abortRef.current?.signal,
-        })
-        if (!res.ok) throw new Error(`HTTP ${res.status}`)
-        const data = await res.json()
+  const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
-        errorCount.current = 0
-        hadSuccessfulPoll.current = true
-        if (data.status === 'completed') {
-          setStatus('completed')
-          setResult(data.result)
-          clearTimeout(timeoutTimer.current)
-        } else if (data.status === 'failed') {
-          setStatus('failed')
-          setError(data.error || '처리 중 오류가 발생했습니다')
-          clearTimeout(timeoutTimer.current)
-        } else {
-          poll(jobId)
+  // 한 달치 작업을 생성하고 job_id를 받는다.
+  const postJob = async (m: number, signal: AbortSignal): Promise<string> => {
+    const res = await fetch(`${API_BASE}/ttu_gaeng/duty`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        year: year.toString(),
+        month: m.toString(),
+        website: extractedUrl,
+      }),
+      signal,
+    })
+    if (!res.ok) throw new Error('요청에 실패했습니다')
+    const { job_id } = await res.json()
+    if (!job_id) throw new Error('서버에서 작업 ID를 받지 못했습니다')
+    return job_id as string
+  }
+
+  // 한 job을 완료/실패까지 폴링한다. (점증 지연 + 연속 오류 한계)
+  const pollJob = (jobId: string, signal: AbortSignal): Promise<JobResult> =>
+    new Promise((resolve, reject) => {
+      let pollCount = 0
+      let errorCount = 0
+      const tick = async () => {
+        pollCount++
+        await sleep(Math.min(pollCount * 1000, 5000))
+        if (signal.aborted) return reject(new DOMException('aborted', 'AbortError'))
+        try {
+          const res = await fetch(`${API_BASE}/ttu_gaeng/duty/${jobId}`, { signal })
+          if (!res.ok) throw new Error(`HTTP ${res.status}`)
+          const data = await res.json()
+          errorCount = 0
+          if (data.status === 'completed') resolve(data.result)
+          else if (data.status === 'failed') reject(new Error(data.error || '처리 중 오류가 발생했습니다'))
+          else tick()
+        } catch (err) {
+          if (err instanceof DOMException && err.name === 'AbortError') return reject(err)
+          errorCount++
+          if (errorCount >= MAX_POLL_ERRORS) return reject(new Error('서버와의 연결이 불안정합니다'))
+          tick()
         }
-      } catch (err) {
-        if (err instanceof DOMException && err.name === 'AbortError') return
-        errorCount.current++
-        if (errorCount.current >= MAX_POLL_ERRORS) {
-          setStatus('failed')
-          setError('서버와의 연결이 불안정합니다')
-          clearTimeout(timeoutTimer.current)
-          return
-        }
-        poll(jobId)
       }
-    }, delay)
-  }, [])
+      tick()
+    })
 
   const submit = async () => {
-    if (!extractedUrl || status === 'submitting' || status === 'polling') return
+    if (!extractedUrl || months.length === 0 || status === 'submitting' || status === 'polling') return
 
     setStatus('submitting')
     setError('')
     setResult(null)
-    pollCount.current = 0
-    errorCount.current = 0
-    hadSuccessfulPoll.current = false
-    abortRef.current = new AbortController()
+    const controller = new AbortController()
+    abortRef.current = controller
 
+    clearTimeout(timeoutTimer.current)
+    timeoutTimer.current = setTimeout(() => {
+      controller.abort()
+      setStatus('timeout')
+      setError('백그라운드에서 처리 중일 수 있습니다')
+    }, 90000)
+
+    // 선택한 달마다 job을 띄우고(병렬), 모두 끝나면 결과를 합산한다.
+    const sortedMonths = [...months].sort((a, b) => a - b)
     try {
-      const res = await fetch(`${API_BASE}/ttu_gaeng/duty`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          year: year.toString(),
-          month: month.toString(),
-          website: extractedUrl,
-        }),
-        signal: abortRef.current.signal,
-      })
-      if (!res.ok) throw new Error('요청에 실패했습니다')
-
-      const { job_id } = await res.json()
-      if (!job_id) throw new Error('서버에서 작업 ID를 받지 못했습니다')
+      const jobIds = await Promise.all(sortedMonths.map(m => postJob(m, controller.signal)))
+      if (controller.signal.aborted) return
       setStatus('polling')
-      poll(job_id)
-
-      timeoutTimer.current = setTimeout(() => {
-        clearTimeout(pollTimer.current)
-        setStatus('timeout')
-        if (!hadSuccessfulPoll.current) {
-          setError('서버에 연결할 수 없습니다')
-        }
-      }, 60000)
+      const results = await Promise.all(jobIds.map(id => pollJob(id, controller.signal)))
+      if (controller.signal.aborted) return
+      clearTimeout(timeoutTimer.current)
+      setResult({
+        events_created: results.reduce((s, r) => s + r.events_created, 0),
+        events_skipped: results.reduce((s, r) => s + r.events_skipped, 0),
+      })
+      setStatus('completed')
     } catch (e) {
+      if (e instanceof DOMException && e.name === 'AbortError') return
+      clearTimeout(timeoutTimer.current)
       setStatus('failed')
       setError(e instanceof Error ? e.message : '요청에 실패했습니다')
     }
@@ -130,7 +135,6 @@ export default function App() {
     setStatus('idle')
     setError('')
     setResult(null)
-    clearTimeout(pollTimer.current)
     clearTimeout(timeoutTimer.current)
     abortRef.current?.abort()
   }
@@ -209,8 +213,11 @@ export default function App() {
 
           {/* Period */}
           <div className="mb-8">
-            <label className="block text-[11px] font-semibold uppercase tracking-[0.15em] text-[#8a7e70] mb-3">
-              기간 선택
+            <label className="flex items-center justify-between text-[11px] font-semibold uppercase tracking-[0.15em] text-[#8a7e70] mb-3">
+              <span>기간 선택</span>
+              <span className="font-normal normal-case tracking-normal text-[10px] text-[#b5a89a]">
+                여러 달 선택 가능
+              </span>
             </label>
 
             {/* Year */}
@@ -238,11 +245,11 @@ export default function App() {
             <div className="grid grid-cols-6 gap-2">
               {MONTHS.map((label, i) => {
                 const m = i + 1
-                const selected = m === month
+                const selected = months.includes(m)
                 return (
                   <button
                     key={m}
-                    onClick={() => setMonth(m)}
+                    onClick={() => toggleMonth(m)}
                     disabled={isWorking}
                     className={`
                       h-10 rounded-xl text-xs font-medium transition-all duration-200
@@ -264,12 +271,12 @@ export default function App() {
           {!isDone && (
             <button
               onClick={submit}
-              disabled={!extractedUrl || isWorking}
+              disabled={!extractedUrl || months.length === 0 || isWorking}
               className={`
                 w-full h-[52px] rounded-xl font-semibold text-[15px] transition-all duration-200
                 ${isWorking
                   ? 'bg-[#f5e6db] text-[#c0613a] cursor-default'
-                  : extractedUrl
+                  : extractedUrl && months.length > 0
                     ? 'bg-[#c0613a] text-white hover:bg-[#a85330] active:scale-[0.98] shadow-lg shadow-[#c0613a]/15'
                     : 'bg-[#ece4d9] text-[#b5a89a] cursor-not-allowed'
                 }
