@@ -49,12 +49,12 @@ export default function App() {
   const sleep = (ms: number) => new Promise<void>(r => setTimeout(r, ms))
 
   // 한 달치 작업을 생성하고 job_id를 받는다.
-  const postJob = async (m: number, signal: AbortSignal): Promise<string> => {
+  const postJob = async (m: number, y: number, signal: AbortSignal): Promise<string> => {
     const res = await fetch(`${API_BASE}/ttu_gaeng/duty`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        year: year.toString(),
+        year: y.toString(),
         month: m.toString(),
         website: extractedUrl,
       }),
@@ -110,18 +110,41 @@ export default function App() {
     }, 90000)
 
     // 선택한 달마다 job을 띄우고(병렬), 모두 끝나면 결과를 합산한다.
+    // 12월과 1월을 함께 고르면(연말연시 4주기) 1월부터 연속된 선행 구간은 다음 해로 본다.
     const sortedMonths = [...months].sort((a, b) => a - b)
+    const crossYear = sortedMonths.includes(1) && sortedMonths.includes(12)
+    let rollCount = 0
+    if (crossYear) {
+      while (rollCount < sortedMonths.length && sortedMonths[rollCount] === rollCount + 1) rollCount++
+      // 선택한 달이 1~12월로 빈틈없이 이어지면 경계를 넘는 것이 아니므로 롤오버하지 않는다.
+      if (rollCount === sortedMonths.length) rollCount = 0
+    }
+    const jobs = sortedMonths.map((m, i) => ({ m, y: i < rollCount ? year + 1 : year }))
+
     try {
-      const jobIds = await Promise.all(sortedMonths.map(m => postJob(m, controller.signal)))
+      // POST: 일부 실패해도 성공한 job은 계속 진행한다 (부분 성공 보존).
+      const posted = await Promise.allSettled(jobs.map(({ m, y }) => postJob(m, y, controller.signal)))
       if (controller.signal.aborted) return
+      const jobIds = posted.flatMap(p => (p.status === 'fulfilled' ? [p.value] : []))
+      if (jobIds.length === 0) {
+        const reason = posted.find((p): p is PromiseRejectedResult => p.status === 'rejected')?.reason
+        throw reason instanceof Error ? reason : new Error('요청에 실패했습니다')
+      }
       setStatus('polling')
-      const results = await Promise.all(jobIds.map(id => pollJob(id, controller.signal)))
+      const polled = await Promise.allSettled(jobIds.map(id => pollJob(id, controller.signal)))
       if (controller.signal.aborted) return
       clearTimeout(timeoutTimer.current)
+      const results = polled.flatMap(p => (p.status === 'fulfilled' ? [p.value] : []))
+      if (results.length === 0) {
+        const reason = polled.find((p): p is PromiseRejectedResult => p.status === 'rejected')?.reason
+        throw reason instanceof Error ? reason : new Error('처리 중 오류가 발생했습니다')
+      }
+      const failedCount = jobs.length - results.length
       setResult({
         events_created: results.reduce((s, r) => s + r.events_created, 0),
         events_skipped: results.reduce((s, r) => s + r.events_skipped, 0),
       })
+      if (failedCount > 0) setError(`${failedCount}개월은 옮기지 못했습니다`)
       setStatus('completed')
     } catch (e) {
       if (e instanceof DOMException && e.name === 'AbortError') return
@@ -312,6 +335,9 @@ export default function App() {
                     <span className="mx-2 text-[#b5caa8]">/</span>
                     <span className="font-display text-base font-medium text-[#3d6832]">{result.events_skipped}</span>개 건너뜀
                   </p>
+                  {error && (
+                    <p className="text-xs text-[#b88a38] pl-[30px] mt-1.5">{error}</p>
+                  )}
                 </div>
               )}
 
